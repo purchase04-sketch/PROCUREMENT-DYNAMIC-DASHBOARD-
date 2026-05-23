@@ -8,12 +8,11 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { v4: uuidv4 } = require('uuid');
 const models = require('../models/schemas');
-const { recalcCollection, calcDashboardKPIs } = require('../services/calculations');
+const { recalcCollection, calcDashboardKPIs, recalcWithDependencies, validateRow, autoMapColumns, getFormulas, saveCustomFormula, deleteCustomFormula, resetFormulas } = require('../services/calculations');
 const { getIsFallbackMode, getLocalCollection, saveLocalCollection } = require('../config/db');
 
 const upload = multer({ dest: path.join(__dirname, '..', 'uploads') });
 
-// Helper: get data from MongoDB or local JSON
 async function getData(collectionName) {
   if (getIsFallbackMode()) {
     return getLocalCollection(collectionName);
@@ -96,7 +95,6 @@ router.get('/dashboard', async (req, res) => {
     let costSavings = await getData('costsavings');
     let inventory = await getData('inventory');
     let vmiTracking = await getData('vmitracking');
-    // Apply filters
     const applyF = (arr) => {
       let r = arr;
       if (filters.buyer) r = r.filter(x => x.buyer === filters.buyer);
@@ -113,7 +111,7 @@ router.get('/dashboard', async (req, res) => {
     inventory = applyF(inventory);
     vmiTracking = applyF(vmiTracking);
     const kpis = calcDashboardKPIs(schedules, costSavings, inventory, vmiTracking);
-    // Chart data
+    
     const supplierMap = {};
     schedules.forEach(s => {
       if (!s.supplier) return;
@@ -127,6 +125,7 @@ router.get('/dashboard', async (req, res) => {
       name, scheduled: d.scheduled, received: d.received,
       otd: d.total > 0 ? Math.round((d.onTime / d.total) * 100) : 0
     }));
+    
     const monthMap = {};
     schedules.forEach(s => {
       const k = `${s.month}-${s.year}`;
@@ -135,11 +134,13 @@ router.get('/dashboard', async (req, res) => {
       monthMap[k].received += Number(s.receivedQty) || 0;
       monthMap[k].pending += Number(s.pendingQty) || 0;
     });
+    
     const commodityMap = {};
     costSavings.forEach(c => {
       if (!c.commodity) return;
       commodityMap[c.commodity] = (commodityMap[c.commodity] || 0) + (Number(c.monthlySaving) || 0);
     });
+    
     res.json({
       kpis, supplierHeatmap,
       scheduleVsSupply: Object.values(monthMap),
@@ -148,12 +149,28 @@ router.get('/dashboard', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// ============ FORMULAS ============
+router.get('/formulas', (req, res) => { res.json(getFormulas()); });
+router.post('/formulas', (req, res) => {
+  const f = { ...req.body, id: req.body.id || uuidv4() };
+  saveCustomFormula(f);
+  res.json({ message: 'Formula saved', formula: f });
+});
+router.delete('/formulas/:id', (req, res) => {
+  deleteCustomFormula(req.params.id);
+  res.json({ message: 'Formula deleted' });
+});
+router.post('/formulas/reset', (req, res) => {
+  resetFormulas();
+  res.json({ message: 'Formulas reset to default' });
+});
+
 // ============ GENERIC CRUD ============
 router.get('/data/:collection', async (req, res) => {
   try {
     const { collection } = req.params;
     let data = await getData(collection);
-    data = recalcCollection(collection, data);
+    data = recalcWithDependencies(collection, data);
     const f = req.query;
     if (f.buyer) data = data.filter(x => x.buyer === f.buyer);
     if (f.supplier) data = data.filter(x => x.supplier === f.supplier);
@@ -168,13 +185,15 @@ router.get('/data/:collection', async (req, res) => {
 router.post('/data/:collection', async (req, res) => {
   try {
     const { collection } = req.params;
-    const row = { ...req.body, _id: req.body._id || uuidv4() };
+    let row = { ...req.body, _id: req.body._id || uuidv4() };
+    const val = validateRow(collection, row);
+    row = val.row;
     let data = await getData(collection);
     data.push(row);
-    data = recalcCollection(collection, data);
+    data = recalcWithDependencies(collection, data);
     await saveData(collection, data);
     if (req.app.io) req.app.io.emit('dataUpdate', { collection });
-    res.json({ data, message: 'Row added & recalculated' });
+    res.json({ data, message: 'Row added & recalculated', validation: val });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -184,11 +203,15 @@ router.put('/data/:collection/:id', async (req, res) => {
     let data = await getData(collection);
     const idx = data.findIndex(r => r._id === id);
     if (idx === -1) return res.status(404).json({ error: 'Not found' });
-    data[idx] = { ...data[idx], ...req.body, _id: id };
-    data = recalcCollection(collection, data);
+    
+    let updatedRow = { ...data[idx], ...req.body, _id: id };
+    const val = validateRow(collection, updatedRow);
+    data[idx] = val.row;
+    
+    data = recalcWithDependencies(collection, data);
     await saveData(collection, data);
     if (req.app.io) req.app.io.emit('dataUpdate', { collection });
-    res.json({ data, message: 'Updated & recalculated' });
+    res.json({ data, message: 'Updated & recalculated', validation: val });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -197,20 +220,20 @@ router.delete('/data/:collection/:id', async (req, res) => {
     const { collection, id } = req.params;
     let data = await getData(collection);
     data = data.filter(r => r._id !== id);
-    data = recalcCollection(collection, data);
+    data = recalcWithDependencies(collection, data);
     await saveData(collection, data);
     if (req.app.io) req.app.io.emit('dataUpdate', { collection });
     res.json({ data, message: 'Deleted & recalculated' });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// Bulk update (for grid edits)
 router.put('/data/:collection', async (req, res) => {
   try {
     const { collection } = req.params;
     let data = req.body;
     if (!Array.isArray(data)) return res.status(400).json({ error: 'Expected array' });
-    data = recalcCollection(collection, data);
+    data = data.map(r => validateRow(collection, r).row);
+    data = recalcWithDependencies(collection, data);
     await saveData(collection, data);
     if (req.app.io) req.app.io.emit('dataUpdate', { collection });
     res.json({ data, message: 'Bulk updated & recalculated' });
@@ -224,35 +247,47 @@ router.post('/upload/:collection', upload.single('file'), async (req, res) => {
     if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
     const wb = XLSX.readFile(req.file.path);
     const ws = wb.Sheets[wb.SheetNames[0]];
-    const rows = XLSX.utils.sheet_to_json(ws);
-    const withIds = rows.map(r => ({ ...r, _id: r._id || uuidv4() }));
+    const rawRows = XLSX.utils.sheet_to_json(ws);
+    
+    const withIds = rawRows.map(r => {
+      let mapped = autoMapColumns(r);
+      mapped._id = mapped._id || uuidv4();
+      return validateRow(collection, mapped).row;
+    });
+    
     let existing = await getData(collection);
     existing.push(...withIds);
-    existing = recalcCollection(collection, existing);
+    existing = recalcWithDependencies(collection, existing);
     await saveData(collection, existing);
-    // Log upload
+    
     if (getIsFallbackMode()) {
       const files = getLocalCollection('uploadedfiles');
-      files.push({ _id: uuidv4(), filename: req.file.filename, originalName: req.file.originalname, rowCount: rows.length, targetCollection: collection, uploadedAt: new Date().toISOString() });
+      files.push({ _id: uuidv4(), filename: req.file.filename, originalName: req.file.originalname, rowCount: rawRows.length, targetCollection: collection, uploadedAt: new Date().toISOString() });
       saveLocalCollection('uploadedfiles');
     }
     fs.unlinkSync(req.file.path);
     if (req.app.io) req.app.io.emit('dataUpdate', { collection });
-    res.json({ data: existing, rowCount: rows.length, message: `Uploaded ${rows.length} rows & recalculated` });
+    res.json({ data: existing, rowCount: rawRows.length, message: `Uploaded ${rawRows.length} rows & recalculated` });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// Paste data
 router.post('/paste/:collection', async (req, res) => {
   try {
     const { collection } = req.params;
     const { rows } = req.body;
     if (!Array.isArray(rows)) return res.status(400).json({ error: 'Expected rows array' });
-    const withIds = rows.map(r => ({ ...r, _id: r._id || uuidv4() }));
+    
+    const withIds = rows.map(r => {
+      let mapped = autoMapColumns(r);
+      mapped._id = mapped._id || uuidv4();
+      return validateRow(collection, mapped).row;
+    });
+    
     let existing = await getData(collection);
     existing.push(...withIds);
-    existing = recalcCollection(collection, existing);
+    existing = recalcWithDependencies(collection, existing);
     await saveData(collection, existing);
+    
     if (req.app.io) req.app.io.emit('dataUpdate', { collection });
     res.json({ data: existing, message: `Pasted ${rows.length} rows & recalculated` });
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -261,13 +296,28 @@ router.post('/paste/:collection', async (req, res) => {
 // ============ AI CHAT ============
 router.post('/ai/chat', async (req, res) => {
   try {
-    const { prompt, tabContext, gridData } = req.body;
+    const { prompt, tabContext, gridData, filters } = req.body;
     const OpenAI = require('openai');
     const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-    const systemMsg = `You are an AI Procurement Analyst. Analyze the data and provide actionable insights.
+    
+    const fString = filters ? JSON.stringify(filters) : '{}';
+    const cFormulas = JSON.stringify(getFormulas());
+    
+    const systemMsg = `You are a world-class AI Procurement Analyst. Act exactly like ChatGPT but specialized in procurement.
+You have access to the active user's view context:
 Current Tab: ${tabContext || 'Dashboard'}
-Data Summary: ${JSON.stringify(gridData ? gridData.slice(0, 20) : []).substring(0, 3000)}
-Respond with clear, structured analysis. Use bullet points. If asked to generate email, format it properly.`;
+Active Filters: ${fString}
+Custom Formulas Active: ${cFormulas}
+Data Summary (Max 50 rows): ${JSON.stringify(gridData ? gridData.slice(0, 50) : []).substring(0, 4000)}
+
+Capabilities:
+- If the user asks about anomalies, use the data summary.
+- If asked for formulas, write them mathematically. You can also suggest JavaScript expressions that they can save.
+- Always use the current filters (buyer, month, financial year) when discussing data.
+- Never use or hallucinate unrelated data.
+- If they ask for emails, draft them clearly.
+Respond dynamically and conversationally.`;
+
     const completion = await openai.chat.completions.create({
       model: 'gpt-4o',
       messages: [
@@ -278,7 +328,7 @@ Respond with clear, structured analysis. Use bullet points. If asked to generate
       temperature: 0.7,
     });
     const response = completion.choices[0].message.content;
-    // Log AI interaction
+    
     if (getIsFallbackMode()) {
       const logs = getLocalCollection('ailogs');
       logs.push({ _id: uuidv4(), prompt, response, tabContext, timestamp: new Date().toISOString() });
@@ -287,7 +337,7 @@ Respond with clear, structured analysis. Use bullet points. If asked to generate
     res.json({ response });
   } catch (e) {
     console.error('AI Error:', e.message);
-    res.json({ response: `AI Analysis (Offline Mode):\n\nBased on the ${tabContext || 'current'} data:\n• Review supplier performance metrics for anomalies\n• Check pending quantities exceeding 20% of scheduled amounts\n• Monitor items with coverage days below lead time\n• Prioritize suppliers with Red status for escalation\n\n_Note: Connect OpenAI API for detailed AI-powered insights._` });
+    res.json({ response: `AI Analysis (Offline Mode):\n\nBased on your filters (${JSON.stringify(req.body.filters)}):\n• Review supplier performance metrics for anomalies\n• Evaluate current stock coverage\n\n_Note: Connect OpenAI API for detailed natural language chat._` });
   }
 });
 
