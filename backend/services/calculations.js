@@ -104,13 +104,18 @@ function calcSchedule(row) {
 }
 
 function calcCostSaving(row) {
+  // If user uploaded their own monthlySaving manually, respect it instead of overwriting
+  if (row.monthlySaving !== undefined && row.monthlySaving !== null && row.monthlySaving !== 0 && !row._aiCalculated) {
+    return applyCustomFormulas('costsavings', row);
+  }
+
   const or = Number(row.oldRate) || 0, nr = Number(row.newRate) || 0;
   const l1 = Number(row.l1Rate) || 0, q = Number(row.qty) || 0;
   const rateDifference = Math.round((or - nr) * 100) / 100;
   const monthlySaving = Math.round(rateDifference * q * 100) / 100;
   const annualSaving = Math.round(rateDifference * q * 12 * 100) / 100;
   const l1Saving = Math.round((nr - l1) * q * 100) / 100;
-  const result = { ...row, rateDifference, monthlySaving, annualSaving, l1Saving };
+  const result = { ...row, rateDifference, monthlySaving, annualSaving, l1Saving, _aiCalculated: true };
   return applyCustomFormulas('costsavings', result);
 }
 
@@ -134,11 +139,19 @@ function calcVmiPlanning(row) {
   const lyc = Number(row.lastYearConsumption) || 0, cs = Number(row.currentSchedule) || 0;
   const sob = Number(row.sob) || 0, vd = Number(row.vmiDays) || 30;
   const sf = Number(row.seasonalityFactor) || 1;
+  const ss = Number(row.safetyStock) || 0;
+  
   const movingAverage = Math.round(((lyc / 12) + cs) / 2 * 100) / 100;
+  
+  // ForecastQty = MovingAverage × SeasonalityFactor
   const forecastQty = Math.round(movingAverage * sf * 100) / 100;
+  
+  // VMIQty = (MovingAverage × VMIDays / 30 × SOB) + SafetyStock
+  const vmiQty = Math.round(((movingAverage * vd / 30) * (sob / 100)) + ss * 100) / 100;
+  
   const supplierPlannedQty = Math.round(forecastQty * (sob / 100) * 100) / 100;
   const predictiveQty = Math.round(forecastQty * 1.05 * 100) / 100;
-  const vmiQty = Math.round((forecastQty / 30) * vd * 100) / 100;
+  
   const result = { ...row, movingAverage, forecastQty, supplierPlannedQty, predictiveQty, vmiQty };
   return applyCustomFormulas('vmiplanning', result);
 }
@@ -200,11 +213,42 @@ function validateRow(collection, row) {
   if (!row.buyer) { row.buyer = 'SYSTEM_DEFAULT'; autoFilled.buyer = row.buyer; }
   
   // Auto-assign financial year based on month/date if missing
-  if (!row.year) {
-    const today = new Date();
-    row.year = today.getMonth() < 3 ? today.getFullYear() - 1 : today.getFullYear();
-    autoFilled.year = row.year;
+  // Month string (e.g. 'Jan', 'Feb', etc.) to month index logic:
+  const mNames = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
+  
+  let d = new Date();
+  if (row.month && row.year) {
+    const mIdx = mNames.findIndex(m => row.month.toLowerCase().startsWith(m));
+    if (mIdx !== -1) {
+      d = new Date(Number(row.year), mIdx, 1);
+    } else {
+      d = new Date(Number(row.year), d.getMonth(), 1);
+    }
+  } else if (row.dueDate) {
+    d = new Date(row.dueDate);
   }
+
+  // Apr 2025 - Mar 2026 = FY25-26
+  const m = d.getMonth(); // 0-indexed (0=Jan, 3=Apr)
+  const y = d.getFullYear();
+  let fyStart, fyEnd;
+  
+  if (m >= 3) {
+    // Apr to Dec
+    fyStart = y;
+    fyEnd = y + 1;
+  } else {
+    // Jan to Mar
+    fyStart = y - 1;
+    fyEnd = y;
+  }
+  
+  row.financialYear = `FY${String(fyStart).slice(-2)}-${String(fyEnd).slice(-2)}`;
+  autoFilled.financialYear = row.financialYear;
+  
+  // Extract month/year strings for filtering
+  row.month = row.month || mNames[m].charAt(0).toUpperCase() + mNames[m].slice(1);
+  row.year = row.year || y;
   
   return { valid: errors.length === 0, errors, autoFilled, row };
 }

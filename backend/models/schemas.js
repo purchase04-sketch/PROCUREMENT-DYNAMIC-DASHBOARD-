@@ -42,6 +42,7 @@ const itemSchema = new mongoose.Schema({
 const scheduleSchema = new mongoose.Schema({
   _id: { type: String, default: () => uuidv4() },
   buyer: String,
+  buyerId: String,
   supplier: String,
   itemCode: String,
   itemName: String,
@@ -51,6 +52,7 @@ const scheduleSchema = new mongoose.Schema({
   receiptDate: Date,
   month: String,
   year: Number,
+  financialYear: String,
   plant: String,
   commodity: String,
   category: String,
@@ -66,6 +68,7 @@ const scheduleSchema = new mongoose.Schema({
 const costSavingSchema = new mongoose.Schema({
   _id: { type: String, default: () => uuidv4() },
   buyer: String,
+  buyerId: String,
   supplier: String,
   itemCode: String,
   itemName: String,
@@ -77,11 +80,13 @@ const costSavingSchema = new mongoose.Schema({
   category: String,
   month: String,
   year: Number,
+  financialYear: String,
   // Auto-calculated
   rateDifference: { type: Number, default: 0 },
   monthlySaving: { type: Number, default: 0 },
   annualSaving: { type: Number, default: 0 },
   l1Saving: { type: Number, default: 0 },
+  _aiCalculated: { type: Boolean, default: false },
 }, { timestamps: true });
 
 // ============ INVENTORY ============
@@ -90,6 +95,7 @@ const inventorySchema = new mongoose.Schema({
   itemCode: String,
   itemName: String,
   buyer: String,
+  buyerId: String,
   supplier: String,
   currentStock: { type: Number, default: 0 },
   consumption: { type: Number, default: 0 },
@@ -103,6 +109,7 @@ const inventorySchema = new mongoose.Schema({
   category: String,
   month: String,
   year: Number,
+  financialYear: String,
   // Auto-calculated
   requiredQty: { type: Number, default: 0 },
   shortageQty: { type: Number, default: 0 },
@@ -118,6 +125,7 @@ const vmiPlanningSchema = new mongoose.Schema({
   itemCode: String,
   itemName: String,
   buyer: String,
+  buyerId: String,
   lastYearConsumption: { type: Number, default: 0 },
   currentSchedule: { type: Number, default: 0 },
   sob: { type: Number, default: 0 },
@@ -131,6 +139,7 @@ const vmiPlanningSchema = new mongoose.Schema({
   category: String,
   month: String,
   year: Number,
+  financialYear: String,
   // Auto-calculated
   movingAverage: { type: Number, default: 0 },
   forecastQty: { type: Number, default: 0 },
@@ -146,6 +155,7 @@ const vmiTrackingSchema = new mongoose.Schema({
   itemCode: String,
   itemName: String,
   buyer: String,
+  buyerId: String,
   plannedVmi: { type: Number, default: 0 },
   actualVmi: { type: Number, default: 0 },
   plant: String,
@@ -153,6 +163,7 @@ const vmiTrackingSchema = new mongoose.Schema({
   category: String,
   month: String,
   year: Number,
+  financialYear: String,
   // Auto-calculated
   gapQty: { type: Number, default: 0 },
   vmiCompliance: { type: Number, default: 0 },
