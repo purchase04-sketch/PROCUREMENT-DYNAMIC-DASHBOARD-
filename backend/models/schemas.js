@@ -17,6 +17,44 @@ const buyerSchema = new mongoose.Schema({
   kpiTarget: { type: Number, default: 90 },
 }, { timestamps: true });
 
+// ============ BUYER PROFILE (NEW) ============
+const buyerProfileSchema = new mongoose.Schema({
+  buyerId: { type: String, required: true, unique: true },
+  buyerName: { type: String, required: true },
+  department: String,
+  unit: String,
+  email: String,
+  commodities: [String],
+}, { timestamps: true });
+
+// ============ FORMULA (NEW) ============
+const formulaSchema = new mongoose.Schema({
+  id: { type: String, required: true, unique: true },
+  name: { type: String, required: true },
+  collectionName: { type: String, required: true }, // e.g. 'schedules'
+  field: { type: String, required: true },
+  expression: { type: String, required: true },
+  scope: { type: String, enum: ['global', 'buyer', 'supplier'], default: 'global' },
+  scopeValue: String,
+  isDefault: { type: Boolean, default: false },
+  createdBy: String,
+}, { timestamps: true });
+
+// ============ OTD RECORD (NEW) ============
+const otdRecordSchema = new mongoose.Schema({
+  supplierId: { type: String, required: true },
+  supplierName: { type: String, required: true },
+  buyerId: String,
+  month: String,
+  financialYear: String,
+  week1Score: { type: Number, default: 0 },
+  week2Score: { type: Number, default: 0 },
+  week3Score: { type: Number, default: 0 },
+  week4Score: { type: Number, default: 0 },
+  monthlyOTD: { type: Number, default: 0 },
+  rating: String,
+}, { timestamps: true });
+
 // ============ SUPPLIER ============
 const supplierSchema = new mongoose.Schema({
   name: { type: String, required: true },
@@ -43,6 +81,8 @@ const scheduleSchema = new mongoose.Schema({
   _id: { type: String, default: () => uuidv4() },
   buyer: String,
   buyerId: String,
+  department: String,
+  unit: String,
   supplier: String,
   itemCode: String,
   itemName: String,
@@ -69,6 +109,8 @@ const costSavingSchema = new mongoose.Schema({
   _id: { type: String, default: () => uuidv4() },
   buyer: String,
   buyerId: String,
+  department: String,
+  unit: String,
   supplier: String,
   itemCode: String,
   itemName: String,
@@ -96,6 +138,8 @@ const inventorySchema = new mongoose.Schema({
   itemName: String,
   buyer: String,
   buyerId: String,
+  department: String,
+  unit: String,
   supplier: String,
   currentStock: { type: Number, default: 0 },
   consumption: { type: Number, default: 0 },
@@ -126,6 +170,8 @@ const vmiPlanningSchema = new mongoose.Schema({
   itemName: String,
   buyer: String,
   buyerId: String,
+  department: String,
+  unit: String,
   lastYearConsumption: { type: Number, default: 0 },
   currentSchedule: { type: Number, default: 0 },
   sob: { type: Number, default: 0 },
@@ -156,6 +202,8 @@ const vmiTrackingSchema = new mongoose.Schema({
   itemName: String,
   buyer: String,
   buyerId: String,
+  department: String,
+  unit: String,
   plannedVmi: { type: Number, default: 0 },
   actualVmi: { type: Number, default: 0 },
   plant: String,
@@ -205,6 +253,9 @@ const aiLogSchema = new mongoose.Schema({
 const models = {
   User: mongoose.model('User', userSchema),
   Buyer: mongoose.model('Buyer', buyerSchema),
+  BuyerProfile: mongoose.model('BuyerProfile', buyerProfileSchema),
+  Formula: mongoose.model('Formula', formulaSchema),
+  OTDRecord: mongoose.model('OTDRecord', otdRecordSchema),
   Supplier: mongoose.model('Supplier', supplierSchema),
   Item: mongoose.model('Item', itemSchema),
   Schedule: mongoose.model('Schedule', scheduleSchema),

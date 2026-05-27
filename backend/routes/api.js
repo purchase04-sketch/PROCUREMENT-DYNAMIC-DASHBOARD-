@@ -1,54 +1,77 @@
 const express = require('express');
 const router = express.Router();
 const multer = require('multer');
-const XLSX = require('xlsx');
 const path = require('path');
 const fs = require('fs');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { v4: uuidv4 } = require('uuid');
 const models = require('../models/schemas');
-const { recalcCollection, calcDashboardKPIs, recalcWithDependencies, validateRow, autoMapColumns, getFormulas, saveCustomFormula, deleteCustomFormula, resetFormulas } = require('../services/calculations');
-const { getIsFallbackMode, getLocalCollection, saveLocalCollection } = require('../config/db');
 
+const { getFormulas, saveCustomFormula, deleteCustomFormula, resetFormulas } = require('../services/calculations');
+const { getIsFallbackMode, getLocalCollection, saveLocalCollection } = require('../config/db');
+const { onDataChange, fullRecalculation, exportRecalculatedData } = require('../services/recalculationService');
+const { processExcel, processCSV, processPaste } = require('../services/fileProcessor');
+
+// Multer Setup
 const upload = multer({ dest: path.join(__dirname, '..', 'uploads') });
 
 async function getData(collectionName) {
+  const colKey = collectionName.toLowerCase();
   if (getIsFallbackMode()) {
-    return getLocalCollection(collectionName);
+    return getLocalCollection(colKey);
   }
   const modelMap = {
-    schedules: models.Schedule, costsavings: models.CostSaving,
-    inventory: models.Inventory, vmiplanning: models.VmiPlanning,
-    vmitracking: models.VmiTracking, buyers: models.Buyer,
-    suppliers: models.Supplier, items: models.Item,
-    users: models.User, uploadedfiles: models.UploadedFile,
-    emailhistory: models.EmailHistory, ailogs: models.AiLog,
+    schedules: models.Schedule,
+    costsavings: models.CostSaving,
+    inventory: models.Inventory,
+    vmiplanning: models.VmiPlanning,
+    vmitracking: models.VmiTracking,
+    buyers: models.Buyer,
+    suppliers: models.Supplier,
+    items: models.Item,
+    users: models.User,
+    uploadedfiles: models.UploadedFile,
+    emailhistory: models.EmailHistory,
+    ailogs: models.AiLog,
+    buyerprofiles: models.BuyerProfile,
+    formulas: models.Formula,
+    otdrecords: models.OTDRecord,
   };
-  const Model = modelMap[collectionName.toLowerCase()];
+  const Model = modelMap[colKey];
   if (!Model) return [];
   return await Model.find({}).lean();
 }
 
 async function saveData(collectionName, data) {
+  const colKey = collectionName.toLowerCase();
   if (getIsFallbackMode()) {
-    const col = getLocalCollection(collectionName);
+    const col = getLocalCollection(colKey);
     col.length = 0;
     col.push(...data);
-    saveLocalCollection(collectionName);
+    saveLocalCollection(colKey);
     return;
   }
   const modelMap = {
-    schedules: models.Schedule, costsavings: models.CostSaving,
-    inventory: models.Inventory, vmiplanning: models.VmiPlanning,
-    vmitracking: models.VmiTracking, buyers: models.Buyer,
-    suppliers: models.Supplier, items: models.Item,
+    schedules: models.Schedule,
+    costsavings: models.CostSaving,
+    inventory: models.Inventory,
+    vmiplanning: models.VmiPlanning,
+    vmitracking: models.VmiTracking,
+    buyers: models.Buyer,
+    suppliers: models.Supplier,
+    items: models.Item,
     emailhistory: models.EmailHistory,
+    buyerprofiles: models.BuyerProfile,
+    formulas: models.Formula,
+    otdrecords: models.OTDRecord,
   };
-  const Model = modelMap[collectionName.toLowerCase()];
+  const Model = modelMap[colKey];
   if (!Model) return;
   await Model.deleteMany({});
-  if (data.length > 0) await Model.insertMany(data);
+  if (data.length > 0) {
+    await Model.insertMany(data);
+  }
 }
 
 // ============ AUTH ============
@@ -82,8 +105,50 @@ router.post('/auth/login', async (req, res) => {
     if (!user) return res.status(401).json({ error: 'Invalid credentials' });
     const valid = await bcrypt.compare(password, user.password);
     if (!valid) return res.status(401).json({ error: 'Invalid credentials' });
-    const token = jwt.sign({ id: user._id, role: user.role, name: user.name }, process.env.JWT_SECRET, { expiresIn: '24h' });
+    const token = jwt.sign({ id: user._id, role: user.role, name: user.name }, process.env.JWT_SECRET || 'jwt_secret_fallback', { expiresIn: '24h' });
     res.json({ token, user: { name: user.name, email: user.email, role: user.role } });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ============ BUYER PROFILES ============
+router.post('/buyers/profile', async (req, res) => {
+  try {
+    const { buyerId, buyerName, department, unit, email, commodities } = req.body;
+    const profile = { _id: uuidv4(), buyerId, buyerName, department, unit, email, commodities: commodities || [] };
+    
+    let profiles = await getData('buyerprofiles');
+    profiles.push(profile);
+    await saveData('buyerprofiles', profiles);
+    
+    res.json({ message: 'Buyer profile created successfully', data: profile });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.get('/buyers/profile', async (req, res) => {
+  try {
+    const profiles = await getData('buyerprofiles');
+    res.json(profiles);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.get('/buyers/profile/:id', async (req, res) => {
+  try {
+    const profiles = await getData('buyerprofiles');
+    const profile = profiles.find(p => p.buyerId === req.params.id || p._id === req.params.id);
+    if (!profile) return res.status(404).json({ error: 'Profile not found' });
+    res.json(profile);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.put('/buyers/profile/:id', async (req, res) => {
+  try {
+    const profiles = await getData('buyerprofiles');
+    const idx = profiles.findIndex(p => p.buyerId === req.params.id || p._id === req.params.id);
+    if (idx === -1) return res.status(404).json({ error: 'Profile not found' });
+    
+    profiles[idx] = { ...profiles[idx], ...req.body };
+    await saveData('buyerprofiles', profiles);
+    res.json({ message: 'Buyer profile updated', data: profiles[idx] });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -95,9 +160,10 @@ router.get('/dashboard', async (req, res) => {
     let costSavings = await getData('costsavings');
     let inventory = await getData('inventory');
     let vmiTracking = await getData('vmitracking');
+    
     const applyF = (arr) => {
       let r = arr;
-      if (filters.buyer) r = r.filter(x => x.buyer === filters.buyer);
+      if (filters.buyer) r = r.filter(x => x.buyer === filters.buyer || x.buyerId === filters.buyer);
       if (filters.supplier) r = r.filter(x => x.supplier === filters.supplier);
       if (filters.month) r = r.filter(x => x.month === filters.month);
       if (filters.year) r = r.filter(x => String(x.year) === String(filters.year));
@@ -106,10 +172,13 @@ router.get('/dashboard', async (req, res) => {
       if (filters.category) r = r.filter(x => x.category === filters.category);
       return r;
     };
+    
     schedules = applyF(schedules);
     costSavings = applyF(costSavings);
     inventory = applyF(inventory);
     vmiTracking = applyF(vmiTracking);
+    
+    const { calcDashboardKPIs } = require('../services/calculations');
     const kpis = calcDashboardKPIs(schedules, costSavings, inventory, vmiTracking);
     
     const supplierMap = {};
@@ -121,6 +190,7 @@ router.get('/dashboard', async (req, res) => {
       if (s.otd === 100) supplierMap[s.supplier].onTime++;
       if (s.receiptDate) supplierMap[s.supplier].total++;
     });
+    
     const supplierHeatmap = Object.entries(supplierMap).map(([name, d]) => ({
       name, scheduled: d.scheduled, received: d.received,
       otd: d.total > 0 ? Math.round((d.onTime / d.total) * 100) : 0
@@ -165,14 +235,62 @@ router.post('/formulas/reset', (req, res) => {
   res.json({ message: 'Formulas reset to default' });
 });
 
+// ============ OTD RECORDS ============
+router.get('/otd/supplier/:supplierId', async (req, res) => {
+  try {
+    const otds = await getData('otdrecords');
+    const result = otds.filter(o => o.supplierId === req.params.supplierId);
+    res.json(result);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.get('/otd/monthly', async (req, res) => {
+  try {
+    const otds = await getData('otdrecords');
+    res.json(otds);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ============ RECALCULATION TRIGGERS ============
+router.post('/recalculate/all', async (req, res) => {
+  try {
+    const { buyerId } = req.body;
+    await fullRecalculation(buyerId, req.app.io);
+    res.json({ message: 'Full recalculation completed successfully across all collections' });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.post('/recalculate/:collection', async (req, res) => {
+  try {
+    const { collection } = req.params;
+    const { buyerId } = req.body;
+    const data = await getData(collection);
+    await onDataChange({ collection, data, buyerId }, req.app.io);
+    res.json({ message: `Collection [${collection}] recalculated successfully` });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ============ EXPORT DATA ============
+router.get('/export/:collection', async (req, res) => {
+  try {
+    const { collection } = req.params;
+    const { buyerId } = req.query;
+    
+    const buffer = await exportRecalculatedData(buyerId, collection);
+    
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename=${collection}_recalculated.xlsx`);
+    res.send(buffer);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // ============ GENERIC CRUD ============
 router.get('/data/:collection', async (req, res) => {
   try {
     const { collection } = req.params;
     let data = await getData(collection);
-    data = recalcWithDependencies(collection, data);
     const f = req.query;
-    if (f.buyer) data = data.filter(x => x.buyer === f.buyer);
+    if (f.buyer) data = data.filter(x => x.buyer === f.buyer || x.buyerId === f.buyer);
     if (f.supplier) data = data.filter(x => x.supplier === f.supplier);
     if (f.month) data = data.filter(x => x.month === f.month);
     if (f.year) data = data.filter(x => String(x.year) === String(f.year));
@@ -185,15 +303,13 @@ router.get('/data/:collection', async (req, res) => {
 router.post('/data/:collection', async (req, res) => {
   try {
     const { collection } = req.params;
-    let row = { ...req.body, _id: req.body._id || uuidv4() };
-    const val = validateRow(collection, row);
-    row = val.row;
+    const row = { ...req.body, _id: req.body._id || uuidv4() };
+    
     let data = await getData(collection);
     data.push(row);
-    data = recalcWithDependencies(collection, data);
-    await saveData(collection, data);
-    if (req.app.io) req.app.io.emit('dataUpdate', { collection });
-    res.json({ data, message: 'Row added & recalculated', validation: val });
+    
+    await onDataChange({ collection, data, buyerId: row.buyerId || row.buyer }, req.app.io);
+    res.json({ message: 'Row added & recalculated successfully', data });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -204,14 +320,11 @@ router.put('/data/:collection/:id', async (req, res) => {
     const idx = data.findIndex(r => r._id === id);
     if (idx === -1) return res.status(404).json({ error: 'Not found' });
     
-    let updatedRow = { ...data[idx], ...req.body, _id: id };
-    const val = validateRow(collection, updatedRow);
-    data[idx] = val.row;
+    const updatedRow = { ...data[idx], ...req.body, _id: id };
+    data[idx] = updatedRow;
     
-    data = recalcWithDependencies(collection, data);
-    await saveData(collection, data);
-    if (req.app.io) req.app.io.emit('dataUpdate', { collection });
-    res.json({ data, message: 'Updated & recalculated', validation: val });
+    await onDataChange({ collection, data, buyerId: updatedRow.buyerId || updatedRow.buyer }, req.app.io);
+    res.json({ message: 'Updated & recalculated successfully', data });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -219,24 +332,24 @@ router.delete('/data/:collection/:id', async (req, res) => {
   try {
     const { collection, id } = req.params;
     let data = await getData(collection);
+    const row = data.find(r => r._id === id);
+    if (!row) return res.status(404).json({ error: 'Not found' });
+    
     data = data.filter(r => r._id !== id);
-    data = recalcWithDependencies(collection, data);
-    await saveData(collection, data);
-    if (req.app.io) req.app.io.emit('dataUpdate', { collection });
-    res.json({ data, message: 'Deleted & recalculated' });
+    
+    await onDataChange({ collection, data, buyerId: row.buyerId || row.buyer }, req.app.io);
+    res.json({ message: 'Deleted & recalculated successfully', data });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 router.put('/data/:collection', async (req, res) => {
   try {
     const { collection } = req.params;
-    let data = req.body;
-    if (!Array.isArray(data)) return res.status(400).json({ error: 'Expected array' });
-    data = data.map(r => validateRow(collection, r).row);
-    data = recalcWithDependencies(collection, data);
-    await saveData(collection, data);
-    if (req.app.io) req.app.io.emit('dataUpdate', { collection });
-    res.json({ data, message: 'Bulk updated & recalculated' });
+    const rows = req.body;
+    if (!Array.isArray(rows)) return res.status(400).json({ error: 'Expected array' });
+    
+    await onDataChange({ collection, data: rows, buyerId: rows[0]?.buyerId }, req.app.io);
+    res.json({ message: 'Bulk updated & recalculated successfully', data: rows });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -244,30 +357,49 @@ router.put('/data/:collection', async (req, res) => {
 router.post('/upload/:collection', upload.single('file'), async (req, res) => {
   try {
     const { collection } = req.params;
-    if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
-    const wb = XLSX.readFile(req.file.path);
-    const ws = wb.Sheets[wb.SheetNames[0]];
-    const rawRows = XLSX.utils.sheet_to_json(ws);
+    const { buyerId, buyerName, department, unit } = req.body;
+    const buyerContext = buyerId ? { buyerId, buyerName, department, unit } : null;
     
-    const withIds = rawRows.map(r => {
-      let mapped = autoMapColumns(r);
-      mapped._id = mapped._id || uuidv4();
-      return validateRow(collection, mapped).row;
-    });
+    if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+    
+    const ext = path.extname(req.file.originalname).toLowerCase();
+    let result;
+    if (ext === '.csv') {
+      result = processCSV(req.file.path, collection, buyerContext);
+    } else {
+      result = processExcel(req.file.path, collection, buyerContext);
+    }
     
     let existing = await getData(collection);
-    existing.push(...withIds);
-    existing = recalcWithDependencies(collection, existing);
-    await saveData(collection, existing);
+    existing.push(...result.processedRows);
+    
+    await onDataChange({ collection, data: existing, buyerId }, req.app.io);
     
     if (getIsFallbackMode()) {
       const files = getLocalCollection('uploadedfiles');
-      files.push({ _id: uuidv4(), filename: req.file.filename, originalName: req.file.originalname, rowCount: rawRows.length, targetCollection: collection, uploadedAt: new Date().toISOString() });
+      files.push({ _id: uuidv4(), filename: req.file.filename, originalName: req.file.originalname, rowCount: result.totalProcessed, targetCollection: collection, uploadedAt: new Date().toISOString() });
       saveLocalCollection('uploadedfiles');
     }
+    
     fs.unlinkSync(req.file.path);
-    if (req.app.io) req.app.io.emit('dataUpdate', { collection });
-    res.json({ data: existing, rowCount: rawRows.length, message: `Uploaded ${rawRows.length} rows & recalculated` });
+    res.json({ message: `Uploaded ${result.totalProcessed} rows & recalculated`, data: existing });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.post('/data/:collection/bulk-paste', async (req, res) => {
+  try {
+    const { collection } = req.params;
+    const { rows, buyerId, buyerName, department, unit } = req.body;
+    const buyerContext = buyerId ? { buyerId, buyerName, department, unit } : null;
+    
+    if (!Array.isArray(rows)) return res.status(400).json({ error: 'Expected rows array' });
+    
+    const result = processPaste(rows, collection, buyerContext);
+    let existing = await getData(collection);
+    existing.push(...result.processedRows);
+    
+    await onDataChange({ collection, data: existing, buyerId }, req.app.io);
+    res.json({ message: `Pasted ${result.totalProcessed} rows & recalculated`, data: existing });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -277,19 +409,12 @@ router.post('/paste/:collection', async (req, res) => {
     const { rows } = req.body;
     if (!Array.isArray(rows)) return res.status(400).json({ error: 'Expected rows array' });
     
-    const withIds = rows.map(r => {
-      let mapped = autoMapColumns(r);
-      mapped._id = mapped._id || uuidv4();
-      return validateRow(collection, mapped).row;
-    });
-    
+    const result = processPaste(rows, collection, null);
     let existing = await getData(collection);
-    existing.push(...withIds);
-    existing = recalcWithDependencies(collection, existing);
-    await saveData(collection, existing);
+    existing.push(...result.processedRows);
     
-    if (req.app.io) req.app.io.emit('dataUpdate', { collection });
-    res.json({ data: existing, message: `Pasted ${rows.length} rows & recalculated` });
+    await onDataChange({ collection, data: existing }, req.app.io);
+    res.json({ message: `Pasted ${result.totalProcessed} rows & recalculated`, data: existing });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
