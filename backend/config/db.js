@@ -32,17 +32,24 @@ function saveCollection(name) {
 }
 
 async function connectDB() {
+  const uri = process.env.MONGODB_URI;
+  if (!uri) {
+    console.log('ℹ️  No MONGODB_URI configured in .env. Starting in Local Offline Mode...');
+    isFallbackMode = true;
+    ensureDataDir();
+    console.log('✅ Local JSON Database initialized');
+    return;
+  }
+
   try {
-    const uri = process.env.MONGODB_URI;
-    if (!uri) throw new Error('No MONGODB_URI in .env');
     await mongoose.connect(uri, {
       serverSelectionTimeoutMS: 5000,
       socketTimeoutMS: 10000,
     });
-    console.log('✅ Connected to MongoDB Atlas');
+    console.log('✅ Connected to MongoDB');
     isFallbackMode = false;
   } catch (err) {
-    console.warn('⚠️  MongoDB Atlas connection failed:', err.message);
+    console.warn('⚠️  MongoDB connection failed:', err.message);
     console.log('📁 Switching to Local JSON File Database...');
     isFallbackMode = true;
     ensureDataDir();
