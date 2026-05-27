@@ -65,4 +65,5 @@ async function start() {
   });
 }
 
+// Watch trigger comment to force server reload and execute clean database startup
 start();
